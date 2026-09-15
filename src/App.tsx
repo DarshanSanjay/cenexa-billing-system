@@ -8,12 +8,14 @@ import BarcodeScanner from './components/BarcodeScanner'
 import type { ScanPayload } from './components/BarcodeScanner'
 
 const COMPANY_DETAILS = {
-  name: 'CENEXA SYSTEMS',
-  proprietor: 'B. Lalith Kumar',
-  phone1: '+91 89253 06434',
-  phone2: '+91 99949 81576',
-  email: 'cenexasystems@gmail.com',
-  address: 'Sri Venkateswara Complex, Mahalakshmi Nagar, G.N.T Road, Redhills, Chennai – 600052',
+  name: import.meta.env.VITE_COMPANY_NAME || 'CENEXA SYSTEMS',
+  proprietor: import.meta.env.VITE_PROPRIETOR || 'B. Lalith Kumar',
+  phone1: import.meta.env.VITE_PHONE_PRIMARY || '+91 89253 06434',
+  phone2: import.meta.env.VITE_PHONE_SECONDARY || '+91 99949 81576',
+  email: import.meta.env.VITE_EMAIL || 'cenexasystems@gmail.com',
+  address:
+    import.meta.env.VITE_ADDRESS ||
+    'Sri Venkateswara Complex, Mahalakshmi Nagar, G.N.T Road, Redhills, Chennai – 600052',
   tagline:
     'Technology-driven digital solutions company focused on building innovative, scalable, and efficient systems that simplify business processes and enhance user experience.',
   services: [
@@ -22,7 +24,7 @@ const COMPANY_DETAILS = {
     'AI-Powered Tools',
     'Scalable Business Solutions',
   ],
-  invoicePrefix: 'CEN',
+  invoicePrefix: import.meta.env.VITE_INVOICE_PREFIX || 'CEN',
   currency: 'Indian Rupee (₹)',
 }
 
