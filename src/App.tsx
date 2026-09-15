@@ -781,9 +781,16 @@ function LoginPage({ onLogin }: { onLogin: (p: UserProfile) => void }) {
   }
 
   const quickDemoLogin = (demoRole: UserRole) => {
-    const demoEmail = demoRole === 'admin' ? 'admin@cenexa.com' : 'staff@cenexa.com'
+    const adminEmail = import.meta.env.VITE_DEFAULT_ADMIN_EMAIL || 'admin@cenexa.com'
+    const adminPassword = import.meta.env.VITE_DEFAULT_ADMIN_PASSWORD || 'Cenexa@2026'
+    const staffEmail = import.meta.env.VITE_DEFAULT_STAFF_EMAIL || 'staff@cenexa.com'
+    const staffPassword = import.meta.env.VITE_DEFAULT_STAFF_PASSWORD || 'Cenexa@2026'
+
+    const demoEmail = demoRole === 'admin' ? adminEmail : staffEmail
+    const demoPassword = demoRole === 'admin' ? adminPassword : staffPassword
+
     setEmail(demoEmail)
-    setPassword('Cenexa@2026')
+    setPassword(demoPassword)
     setIsSignUp(false)
     setErrorMsg('')
   }
