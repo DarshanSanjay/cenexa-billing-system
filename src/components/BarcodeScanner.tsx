@@ -1,29 +1,274 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { BrowserMultiFormatReader, NotFoundException } from '@zxing/browser'
-import { BarcodeFormat, DecodeHintType } from '@zxing/library'
+import { BrowserMultiFormatReader } from '@zxing/browser'
+import { BarcodeFormat, DecodeHintType, NotFoundException } from '@zxing/library'
 import { Camera, CheckCircle2, ClipboardPaste, RotateCcw, X } from 'lucide-react'
 import './barcodeScanner.css'
 
 export type ScanPayload = { value: string; format: string }
 type Props = { open: boolean; onClose: () => void; onDetected: (payload: ScanPayload) => void }
 
-const hints = new Map()
-hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.CODE_128, BarcodeFormat.EAN_13, BarcodeFormat.EAN_8, BarcodeFormat.UPC_A, BarcodeFormat.UPC_E, BarcodeFormat.QR_CODE, BarcodeFormat.CODE_39, BarcodeFormat.ITF])
+const hints = new Map<DecodeHintType, unknown>()
+hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+  BarcodeFormat.CODE_128,
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+  BarcodeFormat.QR_CODE,
+  BarcodeFormat.CODE_39,
+  BarcodeFormat.ITF,
+])
 hints.set(DecodeHintType.TRY_HARDER, true)
 
-const formatNames: Record<number, string> = {[BarcodeFormat.CODE_128]:'Code 128',[BarcodeFormat.EAN_13]:'EAN-13',[BarcodeFormat.EAN_8]:'EAN-8',[BarcodeFormat.UPC_A]:'UPC-A',[BarcodeFormat.UPC_E]:'UPC-E',[BarcodeFormat.QR_CODE]:'QR Code',[BarcodeFormat.CODE_39]:'Code 39',[BarcodeFormat.ITF]:'ITF'}
+const formatNames: Record<number, string> = {
+  [BarcodeFormat.CODE_128]: 'Code 128',
+  [BarcodeFormat.EAN_13]: 'EAN-13',
+  [BarcodeFormat.EAN_8]: 'EAN-8',
+  [BarcodeFormat.UPC_A]: 'UPC-A',
+  [BarcodeFormat.UPC_E]: 'UPC-E',
+  [BarcodeFormat.QR_CODE]: 'QR Code',
+  [BarcodeFormat.CODE_39]: 'Code 39',
+  [BarcodeFormat.ITF]: 'ITF',
+}
 
-function beep(){try{const AudioContextClass=window.AudioContext||(window as typeof window & {webkitAudioContext?:typeof AudioContext}).webkitAudioContext;if(!AudioContextClass)return;const context=new AudioContextClass();const oscillator=context.createOscillator();const gain=context.createGain();oscillator.frequency.value=880;gain.gain.setValueAtTime(.0001,context.currentTime);gain.gain.exponentialRampToValueAtTime(.12,context.currentTime+.01);gain.gain.exponentialRampToValueAtTime(.0001,context.currentTime+.12);oscillator.connect(gain).connect(context.destination);oscillator.start();oscillator.stop(context.currentTime+.12);window.setTimeout(()=>context.close().catch(()=>undefined),250)}catch{}}
+function beep() {
+  try {
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextClass) return
+    const context = new AudioContextClass()
+    const oscillator = context.createOscillator()
+    const gain = context.createGain()
+    oscillator.frequency.value = 880
+    gain.gain.setValueAtTime(0.0001, context.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.01)
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.12)
+    oscillator.connect(gain).connect(context.destination)
+    oscillator.start()
+    oscillator.stop(context.currentTime + 0.12)
+    window.setTimeout(() => context.close().catch(() => undefined), 250)
+  } catch {
+    // Audio not available — ignore silently
+  }
+}
 
-function validate(value:string,format:number|undefined){const clean=value.trim();if(!clean)return false;if(format===BarcodeFormat.EAN_13||format===BarcodeFormat.UPC_A||format===BarcodeFormat.EAN_8){const expected=format===BarcodeFormat.EAN_13?13:format===BarcodeFormat.UPC_A?12:8;if(!new RegExp(`^\\d{${expected}}$`).test(clean))return false;const digits=clean.split('').map(Number);const check=digits.pop() as number;const sum=digits.reduce((total,digit,index)=>{const fromRight=digits.length-index;return total+digit*(fromRight%2===0?3:1)},0);return(10-(sum%10))%10===check}return clean.length<=128}
+function validate(value: string, format: number | undefined): boolean {
+  const clean = value.trim()
+  if (!clean) return false
+  if (
+    format === BarcodeFormat.EAN_13 ||
+    format === BarcodeFormat.UPC_A ||
+    format === BarcodeFormat.EAN_8
+  ) {
+    const expected =
+      format === BarcodeFormat.EAN_13 ? 13 : format === BarcodeFormat.UPC_A ? 12 : 8
+    if (!new RegExp(`^\\d{${expected}}$`).test(clean)) return false
+    const digits = clean.split('').map(Number)
+    const check = digits.pop() as number
+    const sum = digits.reduce((total, digit, index) => {
+      const fromRight = digits.length - index
+      return total + digit * (fromRight % 2 === 0 ? 3 : 1)
+    }, 0)
+    return (10 - (sum % 10)) % 10 === check
+  }
+  return clean.length <= 128
+}
 
-export default function BarcodeScanner({open,onClose,onDetected}:Props){
- const videoRef=useRef<HTMLVideoElement>(null);const readerRef=useRef<BrowserMultiFormatReader|null>(null);const controlsRef=useRef<{stop:()=>void}|null>(null);const lastValueRef=useRef('');
- const [status,setStatus]=useState<'starting'|'scanning'|'success'|'error'>('starting');const [message,setMessage]=useState('Starting camera…');const [manual,setManual]=useState('');const [manualError,setManualError]=useState('');const [cameras,setCameras]=useState<MediaDeviceInfo[]>([]);const [cameraIndex,setCameraIndex]=useState(0)
- const stopCamera=useCallback(()=>{controlsRef.current?.stop();controlsRef.current=null;readerRef.current?.reset();readerRef.current=null;if(videoRef.current?.srcObject instanceof MediaStream){videoRef.current.srcObject.getTracks().forEach(track=>track.stop());videoRef.current.srcObject=null}},[])
- const startCamera=useCallback(async(deviceId?:string)=>{stopCamera();setStatus('starting');setMessage('Starting camera…');try{if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia)throw new Error('Camera scanning requires HTTPS (or localhost) and a supported browser.');const devices=await navigator.mediaDevices.enumerateDevices();const videoDevices=devices.filter(device=>device.kind==='videoinput');setCameras(videoDevices);if(!videoDevices.length)throw new Error('No camera was found on this device.');const selected=deviceId||videoDevices[Math.min(cameraIndex,videoDevices.length-1)]?.deviceId;const reader=new BrowserMultiFormatReader(hints,{delayBetweenScanAttempts:120,delayBetweenScanSuccess:700});readerRef.current=reader;const controls=await reader.decodeFromVideoDevice(selected,videoRef.current!, (result,error)=>{if(result){const value=result.getText().trim();const format=result.getBarcodeFormat();if(!validate(value,format)||value===lastValueRef.current)return;lastValueRef.current=value;setStatus('success');setMessage(`${formatNames[format]||'Barcode'} detected`);beep();onDetected({value,format:formatNames[format]||'Barcode'});window.setTimeout(()=>{if(open)setStatus('scanning')},650);return}if(error&&!(error instanceof NotFoundException)){} });controlsRef.current=controls;setStatus('scanning');setMessage('Align the barcode inside the scan frame')}catch(error){setStatus('error');setMessage(error instanceof Error?error.message:'Unable to access the camera.')}},[cameraIndex,onDetected,open,stopCamera])
- useEffect(()=>{if(!open){stopCamera();return}lastValueRef.current='';setManual('');setManualError('');void startCamera();return()=>stopCamera()},[open,startCamera,stopCamera])
- const submitManual=()=>{const value=manual.trim();if(!validate(value,undefined)){setManualError('Enter a valid non-empty barcode value (up to 128 characters).');return}setManualError('');onDetected({value,format:'Manual entry'});setManual('');setStatus('success');setMessage('Barcode added to the bill');beep()}
- if(!open)return null
- return <div className="barcodeOverlay" role="dialog" aria-modal="true" aria-label="Barcode scanner"><div className="barcodeModal"><div className="barcodeHeader"><div><div className="barcodeKicker"><Camera size={13}/> LIVE SCANNER</div><h3>Scan product barcode</h3><p>Code 128 · EAN-13 · UPC-A · QR and more</p></div><button className="scannerClose" onClick={onClose} aria-label="Close scanner"><X size={19}/></button></div><div className="scannerViewport"><video ref={videoRef} className="scannerVideo" autoPlay muted playsInline/><div className="scannerShade"/><div className={`scanFrame ${status==='success'?'scanSuccess':''}`}><span className="corner tl"/><span className="corner tr"/><span className="corner bl"/><span className="corner br"/><div className="scanLine"/></div><div className={`scannerStatus ${status}`}>{status==='success'?<CheckCircle2 size={16}/>:<span className="statusDot"/>}<span>{message}</span></div></div>{cameras.length>1&&<div className="cameraPicker"><span>Camera</span><select value={cameraIndex} onChange={event=>{const next=Number(event.target.value);setCameraIndex(next);void startCamera(cameras[next]?.deviceId)}}>{cameras.map((camera,index)=><option key={camera.deviceId||index} value={index}>{camera.label||`Camera ${index+1}`}</option>)}</select></div>}<div className="manualScanner"><div className="manualTitle"><ClipboardPaste size={15}/><span>Camera unavailable?</span><small>Enter or paste the barcode</small></div><div className="manualRow"><input value={manual} onChange={event=>setManual(event.target.value)} onKeyDown={event=>{if(event.key==='Enter')submitManual()}} placeholder="e.g. 8901234567890" inputMode="numeric" autoComplete="off"/><button className="primary" onClick={submitManual}>Add</button></div>{manualError&&<div className="scannerError">{manualError}</div>}</div><div className="scannerFooter"><span>Camera access stays in your browser.</span><button onClick={()=>{lastValueRef.current='';void startCamera()}}><RotateCcw size={14}/> Restart</button></div></div></div>
+export default function BarcodeScanner({ open, onClose, onDetected }: Props) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const readerRef = useRef<BrowserMultiFormatReader | null>(null)
+  const controlsRef = useRef<{ stop: () => void } | null>(null)
+  const lastValueRef = useRef('')
+  // Keep a ref so async callbacks always see the latest `open` value
+  const openRef = useRef(open)
+  useEffect(() => { openRef.current = open }, [open])
+
+  const [status, setStatus] = useState<'starting' | 'scanning' | 'success' | 'error'>('starting')
+  const [message, setMessage] = useState('Starting camera…')
+  const [manual, setManual] = useState('')
+  const [manualError, setManualError] = useState('')
+  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([])
+  const [cameraIndex, setCameraIndex] = useState(0)
+
+  const stopCamera = useCallback(() => {
+    controlsRef.current?.stop()
+    controlsRef.current = null
+    readerRef.current = null
+    if (videoRef.current?.srcObject instanceof MediaStream) {
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop())
+      videoRef.current.srcObject = null
+    }
+  }, [])
+
+  const startCamera = useCallback(
+    async (deviceId?: string) => {
+      stopCamera()
+      setStatus('starting')
+      setMessage('Starting camera…')
+      try {
+        if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
+          throw new Error('Camera scanning requires HTTPS (or localhost) and a supported browser.')
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        const videoDevices = devices.filter(device => device.kind === 'videoinput')
+        setCameras(videoDevices)
+        if (!videoDevices.length) throw new Error('No camera was found on this device.')
+        const selected =
+          deviceId || videoDevices[Math.min(cameraIndex, videoDevices.length - 1)]?.deviceId
+        const reader = new BrowserMultiFormatReader(hints, {
+          delayBetweenScanAttempts: 120,
+          delayBetweenScanSuccess: 700,
+        })
+        readerRef.current = reader
+        const controls = await reader.decodeFromVideoDevice(
+          selected,
+          videoRef.current!,
+          (result, error) => {
+            if (result) {
+              const value = result.getText().trim()
+              const format = result.getBarcodeFormat()
+              if (!validate(value, format) || value === lastValueRef.current) return
+              lastValueRef.current = value
+              setStatus('success')
+              setMessage(`${formatNames[format] ?? 'Barcode'} detected`)
+              beep()
+              onDetected({ value, format: formatNames[format] ?? 'Barcode' })
+              // Only reset to scanning if the modal is still open
+              window.setTimeout(() => {
+                if (openRef.current) setStatus('scanning')
+              }, 650)
+              return
+            }
+            if (error && !(error instanceof NotFoundException)) {
+              // Silently ignore other transient decode errors
+            }
+          },
+        )
+        controlsRef.current = controls
+        setStatus('scanning')
+        setMessage('Align the barcode inside the scan frame')
+      } catch (error) {
+        setStatus('error')
+        setMessage(error instanceof Error ? error.message : 'Unable to access the camera.')
+      }
+    },
+    [cameraIndex, onDetected, stopCamera],
+  )
+
+  useEffect(() => {
+    if (!open) {
+      stopCamera()
+      return
+    }
+    lastValueRef.current = ''
+    setManual('')
+    setManualError('')
+    void startCamera()
+    return () => stopCamera()
+  }, [open, startCamera, stopCamera])
+
+  const submitManual = () => {
+    const value = manual.trim()
+    if (!validate(value, undefined)) {
+      setManualError('Enter a valid non-empty barcode value (up to 128 characters).')
+      return
+    }
+    setManualError('')
+    onDetected({ value, format: 'Manual entry' })
+    setManual('')
+    setStatus('success')
+    setMessage('Barcode added to the bill')
+    beep()
+  }
+
+  if (!open) return null
+
+  return (
+    <div className="barcodeOverlay" role="dialog" aria-modal="true" aria-label="Barcode scanner">
+      <div className="barcodeModal">
+        <div className="barcodeHeader">
+          <div>
+            <div className="barcodeKicker">
+              <Camera size={13} /> LIVE SCANNER
+            </div>
+            <h3>Scan product barcode</h3>
+            <p>Code 128 · EAN-13 · UPC-A · QR and more</p>
+          </div>
+          <button className="scannerClose" onClick={onClose} aria-label="Close scanner">
+            <X size={19} />
+          </button>
+        </div>
+
+        <div className="scannerViewport">
+          <video ref={videoRef} className="scannerVideo" autoPlay muted playsInline />
+          <div className="scannerShade" />
+          <div className={`scanFrame ${status === 'success' ? 'scanSuccess' : ''}`}>
+            <span className="corner tl" />
+            <span className="corner tr" />
+            <span className="corner bl" />
+            <span className="corner br" />
+            <div className="scanLine" />
+          </div>
+          <div className={`scannerStatus ${status}`}>
+            {status === 'success' ? <CheckCircle2 size={16} /> : <span className="statusDot" />}
+            <span>{message}</span>
+          </div>
+        </div>
+
+        {cameras.length > 1 && (
+          <div className="cameraPicker">
+            <span>Camera</span>
+            <select
+              value={cameraIndex}
+              onChange={event => {
+                const next = Number(event.target.value)
+                setCameraIndex(next)
+                void startCamera(cameras[next]?.deviceId)
+              }}
+            >
+              {cameras.map((camera, index) => (
+                <option key={camera.deviceId || index} value={index}>
+                  {camera.label || `Camera ${index + 1}`}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div className="manualScanner">
+          <div className="manualTitle">
+            <ClipboardPaste size={15} />
+            <span>Camera unavailable?</span>
+            <small>Enter or paste the barcode</small>
+          </div>
+          <div className="manualRow">
+            <input
+              value={manual}
+              onChange={event => setManual(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter') submitManual() }}
+              placeholder="e.g. 8901234567890"
+              inputMode="numeric"
+              autoComplete="off"
+            />
+            <button className="primary" onClick={submitManual}>
+              Add
+            </button>
+          </div>
+          {manualError && <div className="scannerError">{manualError}</div>}
+        </div>
+
+        <div className="scannerFooter">
+          <span>Camera access stays in your browser.</span>
+          <button
+            onClick={() => {
+              lastValueRef.current = ''
+              void startCamera()
+            }}
+          >
+            <RotateCcw size={14} /> Restart
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
