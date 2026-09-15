@@ -168,3 +168,4 @@ VALUES
   ('Notebook A5',       'NB-005',  'NB-005',  'Stationery', 85.00,  7,  12),
   ('Office Stapler',    'OFF-011', 'OFF-011', 'Office',     260.00, 11, 18)
 ON CONFLICT (sku) DO NOTHING;
+
