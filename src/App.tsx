@@ -1,11 +1,14 @@
-import { useMemo, useState, type ComponentType, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useMemo, useState, type ComponentType, type Dispatch, type SetStateAction } from 'react'
 import {
-  BarChart3, Bell, Boxes, Camera, ChevronRight, CircleDollarSign,
-  Download, FileText, LayoutDashboard, LogOut, Mail, MapPin, Phone, Plus,
-  Printer, Receipt, Search, Settings, ShoppingCart, Trash2, Users, X,
+  AlertTriangle, BarChart3, Bell, Boxes, Camera, CheckCircle2, ChevronRight,
+  CircleDollarSign, Download, Eye, EyeOff, FileText, KeyRound, LayoutDashboard,
+  Lock, LogIn, LogOut, Mail, MapPin, Phone, Plus, Printer, Receipt, Search,
+  Settings, ShieldAlert, ShieldCheck, ShoppingCart, Trash2, User, UserCheck,
+  UserPlus, Users, X,
 } from 'lucide-react'
 import BarcodeScanner from './components/BarcodeScanner'
 import type { ScanPayload } from './components/BarcodeScanner'
+import { supabase, isSupabaseConfigured, type UserRole, type UserProfile, type DbProduct, type DbBill } from './lib/supabase'
 
 const COMPANY_DETAILS = {
   name: import.meta.env.VITE_COMPANY_NAME || 'CENEXA SYSTEMS',
@@ -51,6 +54,7 @@ type Bill = {
   gst: number
   total: number
   payment: string
+  created_by?: string
 }
 
 const seedProducts: Product[] = [
@@ -72,9 +76,15 @@ const money = (n: number) =>
   `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
 function App() {
+  // ── Authentication & Role State ─────────────────────────────────────────────
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null)
+  const [authLoading, setAuthLoading] = useState(true)
+
+  // ── Application State ───────────────────────────────────────────────────────
   const [page, setPage] = useState('dashboard')
   const [products, setProducts] = useState<Product[]>(seedProducts)
   const [bills, setBills] = useState<Bill[]>(seedBills)
+  const [profilesList, setProfilesList] = useState<UserProfile[]>([])
   const [query, setQuery] = useState('')
   const [cart, setCart] = useState<BillItem[]>([])
   const [customer, setCustomer] = useState('')
@@ -85,6 +95,198 @@ function App() {
   const [scannerOpen, setScannerOpen] = useState(false)
   const [scanMessage, setScanMessage] = useState('')
 
+  // ── 1. Check & Synchronize Auth State on Boot ───────────────────────────────
+  useEffect(() => {
+    let isMounted = true
+
+    async function initAuth() {
+      if (isSupabaseConfigured) {
+        try {
+          const { data: { session } } = await supabase.auth.getSession()
+          if (session?.user && isMounted) {
+            await loadProfile(session.user.id, session.user.email ?? '')
+          }
+        } catch (err) {
+          console.warn('Supabase auth session lookup failed:', err)
+        }
+      } else {
+        // Local/Demo Session Restore
+        const cachedUser = localStorage.getItem('cenexa_user')
+        if (cachedUser && isMounted) {
+          try {
+            const parsed = JSON.parse(cachedUser)
+            setCurrentUser(parsed)
+            setPage(parsed.role === 'admin' ? 'dashboard' : 'billing')
+          } catch {
+            localStorage.removeItem('cenexa_user')
+          }
+        }
+      }
+
+      if (isMounted) setAuthLoading(false)
+    }
+
+    initAuth()
+
+    // Listen to Supabase auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (session?.user) {
+          await loadProfile(session.user.id, session.user.email ?? '')
+        } else if (event === 'SIGNED_OUT') {
+          setCurrentUser(null)
+          localStorage.removeItem('cenexa_user')
+        }
+      }
+    )
+
+    return () => {
+      isMounted = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  // Helper to load profile and role from Supabase or fallback
+  const loadProfile = async (userId: string, email: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single()
+
+      if (data && !error) {
+        const userProfile: UserProfile = {
+          id: data.id,
+          email: data.email || email,
+          full_name: data.full_name || email.split('@')[0],
+          role: data.role as UserRole,
+        }
+        setCurrentUser(userProfile)
+        setPage(userProfile.role === 'admin' ? 'dashboard' : 'billing')
+      } else {
+        // If profile row doesn't exist yet, infer from metadata or default to staff
+        const fallbackRole: UserRole = email.toLowerCase().includes('admin') ? 'admin' : 'staff'
+        const userProfile: UserProfile = {
+          id: userId,
+          email,
+          full_name: email.split('@')[0],
+          role: fallbackRole,
+        }
+        setCurrentUser(userProfile)
+        setPage(fallbackRole === 'admin' ? 'dashboard' : 'billing')
+      }
+    } catch {
+      const fallbackRole: UserRole = email.toLowerCase().includes('admin') ? 'admin' : 'staff'
+      const userProfile: UserProfile = {
+        id: userId,
+        email,
+        full_name: email.split('@')[0],
+        role: fallbackRole,
+      }
+      setCurrentUser(userProfile)
+      setPage(fallbackRole === 'admin' ? 'dashboard' : 'billing')
+    }
+  }
+
+  // ── 2. Fetch Products, Bills, & Profiles from Supabase ──────────────────────
+  useEffect(() => {
+    if (!currentUser || !isSupabaseConfigured) return
+
+    async function loadData() {
+      // Load products
+      try {
+        const { data: prodData } = await supabase
+          .from('products')
+          .select('*')
+          .order('id', { ascending: true })
+
+        if (prodData && prodData.length > 0) {
+          setProducts(
+            prodData.map((p: DbProduct) => ({
+              id: Number(p.id),
+              name: p.name,
+              sku: p.sku,
+              barcode: p.barcode || undefined,
+              category: p.category || 'General',
+              price: Number(p.price),
+              stock: Number(p.stock),
+              gst: Number(p.gst),
+            }))
+          )
+        }
+      } catch (err) {
+        console.warn('Failed to load products from Supabase:', err)
+      }
+
+      // Load bills
+      try {
+        const { data: billData } = await supabase
+          .from('bills')
+          .select('*')
+          .order('id', { ascending: false })
+
+        if (billData && billData.length > 0) {
+          setBills(
+            billData.map((b: DbBill) => ({
+              id: Number(b.id),
+              invoice: b.invoice,
+              customer: b.customer,
+              phone: b.phone || '',
+              date: b.date,
+              items: b.items || [],
+              subtotal: Number(b.subtotal),
+              discount: Number(b.discount),
+              gst: Number(b.gst),
+              total: Number(b.total),
+              payment: b.payment,
+              created_by: b.created_by,
+            }))
+          )
+        }
+      } catch (err) {
+        console.warn('Failed to load bills from Supabase:', err)
+      }
+
+      // Load profiles if admin
+      if (currentUser.role === 'admin') {
+        try {
+          const { data: profileData } = await supabase
+            .from('profiles')
+            .select('*')
+            .order('created_at', { ascending: false })
+
+          if (profileData) {
+            setProfilesList(profileData as UserProfile[])
+          }
+        } catch (err) {
+          console.warn('Failed to load profiles:', err)
+        }
+      }
+    }
+
+    loadData()
+  }, [currentUser])
+
+  // ── 3. Role-Based Page Access Guard ─────────────────────────────────────────
+  // Staff users can ONLY access billing. If state points to admin page, redirect.
+  useEffect(() => {
+    if (currentUser && currentUser.role === 'staff' && page !== 'billing') {
+      setPage('billing')
+    }
+  }, [currentUser, page])
+
+  const handleLogout = async () => {
+    if (isSupabaseConfigured) {
+      await supabase.auth.signOut()
+    }
+    setCurrentUser(null)
+    localStorage.removeItem('cenexa_user')
+    setCart([])
+    setPage('dashboard')
+  }
+
+  // ── Billing Calculations ───────────────────────────────────────────────────
   const filteredProducts = useMemo(
     () =>
       products.filter(p =>
@@ -123,7 +325,7 @@ function App() {
     }
   }
 
-  const checkout = () => {
+  const checkout = async () => {
     if (!cart.length) return
     const bill: Bill = {
       id: Date.now(),
@@ -140,7 +342,10 @@ function App() {
       gst,
       total,
       payment,
+      created_by: currentUser?.id,
     }
+
+    // Update Local State
     setBills(b => [bill, ...b])
     setProducts(ps =>
       ps.map(p => {
@@ -148,6 +353,39 @@ function App() {
         return item ? { ...p, stock: Math.max(0, p.stock - item.qty) } : p
       }),
     )
+
+    // Save to Supabase if configured
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('bills').insert({
+          invoice: bill.invoice,
+          customer: bill.customer,
+          phone: bill.phone,
+          date: bill.date,
+          items: bill.items,
+          subtotal: bill.subtotal,
+          discount: bill.discount,
+          gst: bill.gst,
+          total: bill.total,
+          payment: bill.payment,
+          created_by: currentUser?.id,
+        })
+
+        // Decrement stock in DB
+        for (const item of cart) {
+          const prod = products.find(p => p.id === item.id)
+          if (prod) {
+            await supabase
+              .from('products')
+              .update({ stock: Math.max(0, prod.stock - item.qty) })
+              .eq('id', item.id)
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to insert bill into Supabase:', err)
+      }
+    }
+
     setInvoiceOpen(bill)
     setCart([])
     setCustomer('')
@@ -155,16 +393,56 @@ function App() {
     setDiscount(0)
   }
 
+  // ── Role-Appropriate Navigation ─────────────────────────────────────────────
   type NavEntry = [key: string, label: string, Icon: ComponentType<{ size?: number }>]
-  const nav: NavEntry[] = [
-    ['dashboard', 'Dashboard',   LayoutDashboard],
-    ['billing',   'New Bill',    ShoppingCart],
-    ['products',  'Products',    Boxes],
-    ['customers', 'Customers',   Users],
-    ['reports',   'Reports',     BarChart3],
-    ['settings',  'Settings',    Settings],
-  ]
 
+  const nav: NavEntry[] = useMemo(() => {
+    if (currentUser?.role === 'staff') {
+      return [
+        ['billing', 'New Bill / POS', ShoppingCart],
+      ]
+    }
+    // Admin gets full menu
+    return [
+      ['dashboard', 'Dashboard',   LayoutDashboard],
+      ['billing',   'New Bill',    ShoppingCart],
+      ['products',  'Products',    Boxes],
+      ['customers', 'Customers',   Users],
+      ['reports',   'Reports',     BarChart3],
+      ['users',     'User Roles',  UserCheck],
+      ['settings',  'Settings',    Settings],
+    ]
+  }, [currentUser])
+
+  // ── Loading Screen ──────────────────────────────────────────────────────────
+  if (authLoading) {
+    return (
+      <div className="loginPage">
+        <div style={{ textAlign: 'center', color: '#38bdf8' }}>
+          <div className="loginLogoImg" style={{ margin: '0 auto 16px', display: 'grid', placeItems: 'center' }}>
+            <img src="/cenexa-logo.png" alt="Cenexa Logo" style={{ width: '100%', height: '100%', borderRadius: 12 }} />
+          </div>
+          <h3 style={{ margin: 0, color: '#fff' }}>Connecting to Cenexa Billing...</h3>
+          <p style={{ color: '#94a3b8', fontSize: '12px', marginTop: 6 }}>Authenticating session</p>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Auth / Login Screen ─────────────────────────────────────────────────────
+  if (!currentUser) {
+    return (
+      <LoginPage
+        onLogin={(profile) => {
+          setCurrentUser(profile)
+          localStorage.setItem('cenexa_user', JSON.stringify(profile))
+          setPage(profile.role === 'admin' ? 'dashboard' : 'billing')
+        }}
+      />
+    )
+  }
+
+  // ── Main App Shell ──────────────────────────────────────────────────────────
   return (
     <div className="app">
       <aside className="sidebar">
@@ -172,10 +450,16 @@ function App() {
           <img src="/cenexa-logo.png" alt="Cenexa Systems Logo" className="brandLogoImg" />
           <div>
             <div className="brandName">Cenexa Systems</div>
-            <div className="brandSub">Billing & Management</div>
+            <div className="brandSub">
+              {currentUser.role === 'admin' ? 'Admin Portal' : 'Staff POS Station'}
+            </div>
           </div>
         </div>
-        <div className="sideLabel">MAIN MENU</div>
+
+        <div className="sideLabel">
+          {currentUser.role === 'admin' ? 'ADMIN MENU' : 'STAFF MENU'}
+        </div>
+
         <nav>
           {nav.map(([key, label, Icon]) => (
             <button key={key} className={page === key ? 'nav active' : 'nav'} onClick={() => setPage(key)}>
@@ -185,18 +469,21 @@ function App() {
             </button>
           ))}
         </nav>
+
         <div className="sidebarBottom">
-          <div className="miniCard">
-            <Bell size={17} />
-            <div>
-              <b>{COMPANY_DETAILS.name}</b>
-              <span>{COMPANY_DETAILS.proprietor}</span>
-              <span className="miniContact">{COMPANY_DETAILS.phone1}</span>
+          <div className="userCardSidebar">
+            <div className="userAvatarMini">
+              {currentUser.full_name?.[0]?.toUpperCase() || currentUser.email[0].toUpperCase()}
+            </div>
+            <div className="userInfoMini">
+              <span className="userEmailMini" title={currentUser.email}>{currentUser.email}</span>
+              <span className={`roleBadge ${currentUser.role}`}>{currentUser.role}</span>
             </div>
           </div>
-          <button className="nav">
-            <LogOut size={18} />
-            <span>Logout</span>
+
+          <button className="logoutBtn" onClick={handleLogout}>
+            <LogOut size={16} />
+            <span>Sign Out</span>
           </button>
         </div>
       </aside>
@@ -204,12 +491,16 @@ function App() {
       <main className="content">
         <header className="topbar">
           <div>
-            <div className="eyebrow">{COMPANY_DETAILS.name} / BUSINESS OPERATIONS</div>
+            <div className="eyebrow">
+              {COMPANY_DETAILS.name} / {currentUser.role === 'admin' ? 'ADMINISTRATION' : 'POS TERMINAL'}
+            </div>
             <h1>
               {page === 'dashboard'
                 ? 'Dashboard'
                 : page === 'billing'
                 ? 'Create New Bill'
+                : page === 'users'
+                ? 'User Roles & Access Control'
                 : page[0].toUpperCase() + page.slice(1)}
             </h1>
           </div>
@@ -218,16 +509,25 @@ function App() {
               <Phone size={14} />
               <span>{COMPANY_DETAILS.phone1}</span>
             </div>
-            <div className="status">
-              <span /> Online
+            <div className={`roleBadge ${currentUser.role}`}>
+              {currentUser.role === 'admin' ? <ShieldCheck size={13} /> : <UserCheck size={13} />}
+              <span>{currentUser.role}</span>
             </div>
-            <div className="avatar" title={COMPANY_DETAILS.proprietor}>LK</div>
+            <div className="avatar" title={`${currentUser.email} (${currentUser.role})`}>
+              {currentUser.full_name?.[0]?.toUpperCase() || currentUser.email[0].toUpperCase()}
+            </div>
           </div>
         </header>
 
+        {/* ── Role Protection: Render pages according to permissions ────────── */}
         {page === 'dashboard' && (
-          <Dashboard setPage={setPage} bills={bills} products={products} />
+          currentUser.role === 'admin' ? (
+            <Dashboard setPage={setPage} bills={bills} products={products} />
+          ) : (
+            <AccessDenied setPage={setPage} />
+          )
         )}
+
         {page === 'billing' && (
           <Billing
             products={filteredProducts}
@@ -252,10 +552,46 @@ function App() {
             scanMessage={scanMessage}
           />
         )}
-        {page === 'products' && <Products products={products} setProducts={setProducts} />}
-        {page === 'customers' && <Customers bills={bills} />}
-        {page === 'reports' && <Reports bills={bills} />}
-        {page === 'settings' && <SettingsPage />}
+
+        {page === 'products' && (
+          currentUser.role === 'admin' ? (
+            <Products products={products} setProducts={setProducts} />
+          ) : (
+            <AccessDenied setPage={setPage} />
+          )
+        )}
+
+        {page === 'customers' && (
+          currentUser.role === 'admin' ? (
+            <Customers bills={bills} />
+          ) : (
+            <AccessDenied setPage={setPage} />
+          )
+        )}
+
+        {page === 'reports' && (
+          currentUser.role === 'admin' ? (
+            <Reports bills={bills} />
+          ) : (
+            <AccessDenied setPage={setPage} />
+          )
+        )}
+
+        {page === 'users' && (
+          currentUser.role === 'admin' ? (
+            <UsersManagement profiles={profilesList} setProfiles={setProfilesList} currentUser={currentUser} />
+          ) : (
+            <AccessDenied setPage={setPage} />
+          )
+        )}
+
+        {page === 'settings' && (
+          currentUser.role === 'admin' ? (
+            <SettingsPage />
+          ) : (
+            <AccessDenied setPage={setPage} />
+          )
+        )}
 
         {invoiceOpen && <InvoiceModal bill={invoiceOpen} close={() => setInvoiceOpen(null)} />}
         <BarcodeScanner
@@ -264,6 +600,427 @@ function App() {
           onDetected={handleScan}
         />
       </main>
+    </div>
+  )
+}
+
+// ── Login Component ───────────────────────────────────────────────────────────
+
+function LoginPage({ onLogin }: { onLogin: (p: UserProfile) => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [isSignUp, setIsSignUp] = useState(false)
+  const [signUpRole, setSignUpRole] = useState<UserRole>('staff')
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setErrorMsg('')
+    setLoading(true)
+
+    if (isSupabaseConfigured) {
+      if (isSignUp) {
+        // Sign Up with Supabase
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              role: signUpRole,
+              full_name: email.split('@')[0],
+            },
+          },
+        })
+
+        if (error) {
+          setErrorMsg(error.message)
+          setLoading(false)
+          return
+        }
+
+        if (data.user) {
+          const profile: UserProfile = {
+            id: data.user.id,
+            email: data.user.email ?? email,
+            full_name: email.split('@')[0],
+            role: signUpRole,
+          }
+          onLogin(profile)
+        }
+      } else {
+        // Sign In with Supabase
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        })
+
+        if (error) {
+          setErrorMsg(error.message)
+          setLoading(false)
+          return
+        }
+
+        if (data.user) {
+          // Fetch user role from profiles table
+          try {
+            const { data: prof } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', data.user.id)
+              .single()
+
+            const role: UserRole = (prof?.role as UserRole) || (email.toLowerCase().includes('admin') ? 'admin' : 'staff')
+            const profile: UserProfile = {
+              id: data.user.id,
+              email: data.user.email ?? email,
+              full_name: prof?.full_name || email.split('@')[0],
+              role,
+            }
+            onLogin(profile)
+          } catch {
+            const fallbackRole: UserRole = email.toLowerCase().includes('admin') ? 'admin' : 'staff'
+            onLogin({
+              id: data.user.id,
+              email: data.user.email ?? email,
+              full_name: email.split('@')[0],
+              role: fallbackRole,
+            })
+          }
+        }
+      }
+    } else {
+      // Local Demo Authentication Mode (Immediate testing)
+      setTimeout(() => {
+        if (!email || !password) {
+          setErrorMsg('Please enter both email and password.')
+          setLoading(false)
+          return
+        }
+
+        const role: UserRole = isSignUp ? signUpRole : email.toLowerCase().includes('admin') ? 'admin' : 'staff'
+        const profile: UserProfile = {
+          id: `demo-${Date.now()}`,
+          email,
+          full_name: email.split('@')[0],
+          role,
+        }
+        onLogin(profile)
+      }, 300)
+    }
+
+    setLoading(false)
+  }
+
+  const quickDemoLogin = (demoRole: UserRole) => {
+    const demoEmail = demoRole === 'admin' ? 'admin@cenexa.com' : 'staff@cenexa.com'
+    setEmail(demoEmail)
+    setPassword('Cenexa@2026')
+    setIsSignUp(false)
+  }
+
+  return (
+    <div className="loginPage">
+      <div className="loginGlow" />
+      <div className="loginCard">
+        <div className="loginHeader">
+          <img src="/cenexa-logo.png" alt="Cenexa Systems Logo" className="loginLogoImg" />
+          <h2>{COMPANY_DETAILS.name}</h2>
+          <p>Secure Role-Based Billing & POS System</p>
+        </div>
+
+        <form className="loginForm" onSubmit={handleSubmit}>
+          {errorMsg && (
+            <div className="loginError">
+              <AlertTriangle size={16} />
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
+          <div className="inputGroup">
+            <label>Work Email</label>
+            <div className="inputWrapper">
+              <Mail size={16} color="#64748b" />
+              <input
+                type="email"
+                placeholder="name@company.com"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+              />
+            </div>
+          </div>
+
+          <div className="inputGroup">
+            <label>Password</label>
+            <div className="inputWrapper">
+              <Lock size={16} color="#64748b" />
+              <input
+                type={showPassword ? 'text' : 'password'}
+                placeholder="••••••••"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+              />
+              <button
+                type="button"
+                style={{ border: 0, background: 'none', color: '#64748b', cursor: 'pointer', padding: 0 }}
+                onClick={() => setShowPassword(!showPassword)}
+                aria-label="Toggle password visibility"
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          </div>
+
+          {isSignUp && (
+            <div className="inputGroup">
+              <label>Assign Initial Role</label>
+              <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
+                <button
+                  type="button"
+                  className={`demoRoleBtn ${signUpRole === 'staff' ? 'active' : ''}`}
+                  style={{ flex: 1, borderColor: signUpRole === 'staff' ? '#38bdf8' : undefined }}
+                  onClick={() => setSignUpRole('staff')}
+                >
+                  <UserCheck size={15} /> Staff (POS Only)
+                </button>
+                <button
+                  type="button"
+                  className={`demoRoleBtn ${signUpRole === 'admin' ? 'active' : ''}`}
+                  style={{ flex: 1, borderColor: signUpRole === 'admin' ? '#38bdf8' : undefined }}
+                  onClick={() => setSignUpRole('admin')}
+                >
+                  <ShieldCheck size={15} /> Admin (Full Access)
+                </button>
+              </div>
+            </div>
+          )}
+
+          <button type="submit" className="loginSubmitBtn" disabled={loading}>
+            <LogIn size={16} />
+            <span>{loading ? 'Authenticating...' : isSignUp ? 'Create Account' : 'Sign In to Portal'}</span>
+          </button>
+        </form>
+
+        {/* Quick Demo Credentials */}
+        <div className="loginDemoSection">
+          <div className="loginDemoTitle">Quick Demo Accounts</div>
+          <div className="demoRoleButtons">
+            <button className="demoRoleBtn" onClick={() => quickDemoLogin('admin')}>
+              <ShieldCheck size={15} color="#38bdf8" />
+              <span>Admin Login</span>
+              <small>Full Access</small>
+            </button>
+            <button className="demoRoleBtn" onClick={() => quickDemoLogin('staff')}>
+              <UserCheck size={15} color="#4ade80" />
+              <span>Staff Login</span>
+              <small>POS Only</small>
+            </button>
+          </div>
+        </div>
+
+        <div className="loginFootNote">
+          <span>{isSignUp ? 'Already have an account? ' : "Need to register a new user? "}</span>
+          <button className="authModeToggle" onClick={() => { setIsSignUp(!isSignUp); setErrorMsg('') }}>
+            {isSignUp ? 'Sign In' : 'Create Account'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Access Denied Guard Component ─────────────────────────────────────────────
+
+function AccessDenied({ setPage }: { setPage: (p: string) => void }) {
+  return (
+    <div className="page">
+      <div className="accessDeniedCard">
+        <div className="accessDeniedIcon">
+          <ShieldAlert size={28} />
+        </div>
+        <h3>Access Restricted</h3>
+        <p>
+          You are signed in with a <b>Staff</b> role. Access to analytics, reports, settings,
+          and inventory management is restricted to <b>Administrators</b>.
+        </p>
+        <button className="primary" onClick={() => setPage('billing')}>
+          <ShoppingCart size={16} /> Return to POS Billing Terminal
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Users & Role Management (Admin Only) ──────────────────────────────────────
+
+function UsersManagement({
+  profiles,
+  setProfiles,
+  currentUser,
+}: {
+  profiles: UserProfile[]
+  setProfiles: Dispatch<SetStateAction<UserProfile[]>>
+  currentUser: UserProfile
+}) {
+  const [email, setEmail] = useState('')
+  const [role, setRole] = useState<UserRole>('staff')
+  const [openModal, setOpenModal] = useState(false)
+
+  const handleAddUser = async () => {
+    if (!email) return
+    const newProfile: UserProfile = {
+      id: `usr-${Date.now()}`,
+      email,
+      full_name: email.split('@')[0],
+      role,
+    }
+
+    setProfiles(prev => [newProfile, ...prev])
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('profiles').insert({
+          id: newProfile.id,
+          email: newProfile.email,
+          full_name: newProfile.full_name,
+          role: newProfile.role,
+        })
+      } catch (err) {
+        console.warn('Failed to insert user profile to Supabase:', err)
+      }
+    }
+
+    setEmail('')
+    setOpenModal(false)
+  }
+
+  const toggleRole = async (userId: string, currentRole: UserRole) => {
+    const nextRole: UserRole = currentRole === 'admin' ? 'staff' : 'admin'
+    setProfiles(prev =>
+      prev.map(p => (p.id === userId ? { ...p, role: nextRole } : p))
+    )
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase
+          .from('profiles')
+          .update({ role: nextRole })
+          .eq('id', userId)
+      } catch (err) {
+        console.warn('Failed to update role in Supabase:', err)
+      }
+    }
+  }
+
+  return (
+    <div className="page">
+      <div className="card">
+        <div className="sectionTop">
+          <div>
+            <h3>User Roles & Permissions</h3>
+            <p>Manage Admin and Staff accounts and their system permissions.</p>
+          </div>
+          <button className="primary" onClick={() => setOpenModal(true)}>
+            <UserPlus size={17} /> Add Staff / Admin
+          </button>
+        </div>
+
+        <div className="tableWrap">
+          <table>
+            <thead>
+              <tr>
+                <th>User / Email</th>
+                <th>Current Role</th>
+                <th>Permissions</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* Current Active User */}
+              <tr>
+                <td>
+                  <b>{currentUser.email}</b>
+                  <small style={{ display: 'block', color: '#0284c7' }}>(Current Session)</small>
+                </td>
+                <td>
+                  <span className={`roleBadge ${currentUser.role}`}>{currentUser.role}</span>
+                </td>
+                <td>Full system administrator access</td>
+                <td><span style={{ fontSize: '11px', color: '#64748b' }}>Primary Admin</span></td>
+              </tr>
+
+              {/* Other Registered Users */}
+              {profiles
+                .filter(p => p.email !== currentUser.email)
+                .map(p => (
+                  <tr key={p.id}>
+                    <td><b>{p.email}</b></td>
+                    <td>
+                      <span className={`roleBadge ${p.role}`}>{p.role}</span>
+                    </td>
+                    <td>
+                      {p.role === 'admin'
+                        ? 'Full system access (Dashboard, Reports, Inventory, Users)'
+                        : 'POS Billing Terminal only (Create bills, print receipts)'}
+                    </td>
+                    <td>
+                      <button
+                        className="textBtn"
+                        onClick={() => toggleRole(p.id, p.role)}
+                      >
+                        Change to {p.role === 'admin' ? 'Staff' : 'Admin'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {openModal && (
+        <div className="modalOverlay">
+          <div className="modal">
+            <div className="modalHead">
+              <div>
+                <h3>Add New User</h3>
+                <p>Assign email and permissions role.</p>
+              </div>
+              <button onClick={() => setOpenModal(false)}><X /></button>
+            </div>
+            <input
+              placeholder="user@cenexa.com"
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                className={`demoRoleBtn ${role === 'staff' ? 'active' : ''}`}
+                style={{ flex: 1, borderColor: role === 'staff' ? '#38bdf8' : undefined }}
+                onClick={() => setRole('staff')}
+              >
+                <UserCheck size={15} /> Staff Role (POS)
+              </button>
+              <button
+                type="button"
+                className={`demoRoleBtn ${role === 'admin' ? 'active' : ''}`}
+                style={{ flex: 1, borderColor: role === 'admin' ? '#38bdf8' : undefined }}
+                onClick={() => setRole('admin')}
+              >
+                <ShieldCheck size={15} /> Admin Role (Full)
+              </button>
+            </div>
+            <button className="primary full" disabled={!email} onClick={handleAddUser}>
+              Save User
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -473,7 +1230,7 @@ function Billing(props: BillingProps) {
             <h3>Current Invoice</h3>
             <span>{props.cart.length} line item{props.cart.length === 1 ? '' : 's'}</span>
           </div>
-          <div className="invoiceTag">DRAFT</div>
+          <div className="invoiceTag">POS TERMINAL</div>
         </div>
 
         <div className="customerFields">
@@ -563,7 +1320,7 @@ function Billing(props: BillingProps) {
   )
 }
 
-// ── Products ──────────────────────────────────────────────────────────────────
+// ── Products (Inventory Management - Admin Only) ──────────────────────────────
 
 function Products({
   products,
@@ -577,24 +1334,52 @@ function Products({
   const [price, setPrice] = useState('')
   const [barcode, setBarcode] = useState('')
 
-  const saveProduct = () => {
-    setProducts(x => [
-      ...x,
-      {
-        id: Date.now(),
-        name,
-        sku: barcode || `CEN-${Date.now().toString().slice(-4)}`,
-        barcode: barcode || undefined,
-        category: 'General',
-        price: Number(price),
-        stock: 0,
-        gst: 18,
-      },
-    ])
+  const saveProduct = async () => {
+    const newProduct: Product = {
+      id: Date.now(),
+      name,
+      sku: barcode || `CEN-${Date.now().toString().slice(-4)}`,
+      barcode: barcode || undefined,
+      category: 'General',
+      price: Number(price),
+      stock: 10,
+      gst: 18,
+    }
+
+    setProducts(x => [...x, newProduct])
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('products').insert({
+          name: newProduct.name,
+          sku: newProduct.sku,
+          barcode: newProduct.barcode,
+          category: newProduct.category,
+          price: newProduct.price,
+          stock: newProduct.stock,
+          gst: newProduct.gst,
+        })
+      } catch (err) {
+        console.warn('Failed to insert product in Supabase:', err)
+      }
+    }
+
     setName('')
     setPrice('')
     setBarcode('')
     setOpen(false)
+  }
+
+  const deleteProduct = async (id: number) => {
+    setProducts(x => x.filter(i => i.id !== id))
+
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.from('products').delete().eq('id', id)
+      } catch (err) {
+        console.warn('Failed to delete product in Supabase:', err)
+      }
+    }
   }
 
   return (
@@ -602,8 +1387,8 @@ function Products({
       <div className="card">
         <div className="sectionTop">
           <div>
-            <h3>Product Catalogue</h3>
-            <p>Manage prices, stock, GST and scan codes.</p>
+            <h3>Product Catalogue & Inventory</h3>
+            <p>Manage prices, stock, GST rates and barcode scanner codes.</p>
           </div>
           <button className="primary" onClick={() => setOpen(true)}>
             <Plus size={17} /> Add Product
@@ -630,7 +1415,8 @@ function Products({
                   <td>
                     <button
                       className="iconBtn"
-                      onClick={() => setProducts(x => x.filter(i => i.id !== p.id))}
+                      onClick={() => deleteProduct(p.id)}
+                      aria-label="Delete Product"
                     >
                       <Trash2 size={16} />
                     </button>
@@ -665,7 +1451,7 @@ function Products({
   )
 }
 
-// ── Customers ─────────────────────────────────────────────────────────────────
+// ── Customers (Admin Only) ───────────────────────────────────────────────────
 
 function Customers({ bills }: { bills: Bill[] }) {
   const customers = Array.from(new Map(bills.map(b => [b.customer, b])).values())
@@ -674,8 +1460,8 @@ function Customers({ bills }: { bills: Bill[] }) {
       <div className="card">
         <div className="sectionTop">
           <div>
-            <h3>Customers</h3>
-            <p>Customer profiles from billing activity.</p>
+            <h3>Customer Profiles</h3>
+            <p>Customer accounts and billing history.</p>
           </div>
         </div>
         <div className="tableWrap">
@@ -700,14 +1486,14 @@ function Customers({ bills }: { bills: Bill[] }) {
   )
 }
 
-// ── Reports ───────────────────────────────────────────────────────────────────
+// ── Reports (Admin Only) ──────────────────────────────────────────────────────
 
 function Reports({ bills }: { bills: Bill[] }) {
   const sales = bills.reduce((s, b) => s + b.total, 0)
   return (
     <div className="page">
       <div className="stats">
-        <Stat icon={CircleDollarSign} label="Gross Sales"      value={money(sales)}        delta="All recorded demo bills" />
+        <Stat icon={CircleDollarSign} label="Gross Sales"      value={money(sales)}        delta="All recorded transactions" />
         <Stat icon={FileText}         label="Invoices"          value={String(bills.length)} delta="Successful transactions" />
         <Stat
           icon={ShoppingCart}
@@ -719,8 +1505,8 @@ function Reports({ bills }: { bills: Bill[] }) {
       <div className="card">
         <div className="sectionTop">
           <div>
-            <h3>Sales Report</h3>
-            <p>Invoice-level summary for the current demo dataset.</p>
+            <h3>Sales & Transaction Report</h3>
+            <p>Detailed invoice logs stored in Supabase.</p>
           </div>
           <button className="primary" onClick={() => window.print()}>
             <Printer size={17} /> Print Report
@@ -749,7 +1535,7 @@ function Reports({ bills }: { bills: Bill[] }) {
   )
 }
 
-// ── Settings ──────────────────────────────────────────────────────────────────
+// ── Settings (Admin Only) ────────────────────────────────────────────────────
 
 function SettingsPage() {
   return (
@@ -789,8 +1575,8 @@ function SettingsPage() {
           <b>{COMPANY_DETAILS.services.join(' • ')}</b>
         </div>
         <div className="settingRow">
-          <span>Invoice Prefix</span>
-          <b>{COMPANY_DETAILS.invoicePrefix}</b>
+          <span>Database Mode</span>
+          <b>{isSupabaseConfigured ? '🟢 Supabase Cloud Database Connected' : '🟡 Local / Standby Mode (Set keys in .env)'}</b>
         </div>
         <div className="settingRow">
           <span>Currency</span>
