@@ -153,7 +153,7 @@ function App() {
         .from('profiles')
         .select('*')
         .eq('id', userId)
-        .single()
+        .maybeSingle()
 
       if (data && !error) {
         const userProfile: UserProfile = {
@@ -165,12 +165,25 @@ function App() {
         setCurrentUser(userProfile)
         setPage(userProfile.role === 'admin' ? 'dashboard' : 'billing')
       } else {
-        // If profile row doesn't exist yet, infer from metadata or default to staff
+        // If profile row doesn't exist yet, infer from metadata or default to staff/admin
         const fallbackRole: UserRole = email.toLowerCase().includes('admin') ? 'admin' : 'staff'
+        const fullName = email.split('@')[0]
+
+        try {
+          await supabase.from('profiles').upsert({
+            id: userId,
+            email,
+            full_name: fullName,
+            role: fallbackRole,
+          })
+        } catch {
+          // ignore error if RLS restricts
+        }
+
         const userProfile: UserProfile = {
           id: userId,
           email,
-          full_name: email.split('@')[0],
+          full_name: fullName,
           role: fallbackRole,
         }
         setCurrentUser(userProfile)
@@ -615,99 +628,153 @@ function LoginPage({ onLogin }: { onLogin: (p: UserProfile) => void }) {
   const [isSignUp, setIsSignUp] = useState(false)
   const [signUpRole, setSignUpRole] = useState<UserRole>('staff')
 
+  const handleSuccessfulLogin = async (userId: string, userEmail: string, preferredRole?: UserRole) => {
+    let finalRole: UserRole = preferredRole || (userEmail.toLowerCase().includes('admin') ? 'admin' : 'staff')
+    let fullName = userEmail.split('@')[0]
+
+    try {
+      const { data: prof } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle()
+
+      if (prof) {
+        finalRole = prof.role as UserRole
+        fullName = prof.full_name || fullName
+      } else {
+        await supabase.from('profiles').upsert({
+          id: userId,
+          email: userEmail,
+          full_name: fullName,
+          role: finalRole,
+        })
+      }
+    } catch (err) {
+      console.warn('Profile fetch warning:', err)
+    }
+
+    const profile: UserProfile = {
+      id: userId,
+      email: userEmail,
+      full_name: fullName,
+      role: finalRole,
+    }
+    onLogin(profile)
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setErrorMsg('')
     setLoading(true)
 
+    const cleanEmail = email.trim().toLowerCase()
+    const cleanPassword = password
+
+    if (!cleanEmail || !cleanPassword) {
+      setErrorMsg('Please enter both email and password.')
+      setLoading(false)
+      return
+    }
+
     if (isSupabaseConfigured) {
-      if (isSignUp) {
-        // Sign Up with Supabase
-        const { data, error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: {
-              role: signUpRole,
-              full_name: email.split('@')[0],
+      try {
+        if (isSignUp) {
+          // Sign Up with Supabase
+          const { data, error } = await supabase.auth.signUp({
+            email: cleanEmail,
+            password: cleanPassword,
+            options: {
+              data: {
+                role: signUpRole,
+                full_name: cleanEmail.split('@')[0],
+              },
             },
-          },
-        })
+          })
 
-        if (error) {
-          setErrorMsg(error.message)
-          setLoading(false)
-          return
-        }
-
-        if (data.user) {
-          const profile: UserProfile = {
-            id: data.user.id,
-            email: data.user.email ?? email,
-            full_name: email.split('@')[0],
-            role: signUpRole,
+          if (error) {
+            setErrorMsg(error.message)
+            setLoading(false)
+            return
           }
-          onLogin(profile)
-        }
-      } else {
-        // Sign In with Supabase
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        })
 
-        if (error) {
-          setErrorMsg(error.message)
-          setLoading(false)
-          return
-        }
+          if (data.user) {
+            if (data.session) {
+              await handleSuccessfulLogin(data.user.id, data.user.email ?? cleanEmail, signUpRole)
+            } else {
+              // Try signing in immediately if auto-confirmed
+              const { data: signInData } = await supabase.auth.signInWithPassword({
+                email: cleanEmail,
+                password: cleanPassword,
+              })
 
-        if (data.user) {
-          // Fetch user role from profiles table
-          try {
-            const { data: prof } = await supabase
-              .from('profiles')
-              .select('*')
-              .eq('id', data.user.id)
-              .single()
-
-            const role: UserRole = (prof?.role as UserRole) || (email.toLowerCase().includes('admin') ? 'admin' : 'staff')
-            const profile: UserProfile = {
-              id: data.user.id,
-              email: data.user.email ?? email,
-              full_name: prof?.full_name || email.split('@')[0],
-              role,
+              if (signInData?.user) {
+                await handleSuccessfulLogin(signInData.user.id, signInData.user.email ?? cleanEmail, signUpRole)
+              } else {
+                setErrorMsg('Account created! Please check your email to confirm or sign in.')
+                setIsSignUp(false)
+              }
             }
-            onLogin(profile)
-          } catch {
-            const fallbackRole: UserRole = email.toLowerCase().includes('admin') ? 'admin' : 'staff'
-            onLogin({
-              id: data.user.id,
-              email: data.user.email ?? email,
-              full_name: email.split('@')[0],
-              role: fallbackRole,
-            })
+          }
+        } else {
+          // Sign In with Supabase
+          const { data, error } = await supabase.auth.signInWithPassword({
+            email: cleanEmail,
+            password: cleanPassword,
+          })
+
+          if (error) {
+            const isInvalid = error.message.toLowerCase().includes('invalid') || error.message.toLowerCase().includes('credentials')
+
+            if (isInvalid) {
+              // If credentials not found, attempt auto-signup with inferred role
+              const targetRole: UserRole = cleanEmail.includes('admin') ? 'admin' : 'staff'
+              const { data: signUpData } = await supabase.auth.signUp({
+                email: cleanEmail,
+                password: cleanPassword,
+                options: {
+                  data: {
+                    role: targetRole,
+                    full_name: cleanEmail.split('@')[0],
+                  },
+                },
+              })
+
+              if (signUpData?.session && signUpData.user) {
+                await handleSuccessfulLogin(signUpData.user.id, signUpData.user.email ?? cleanEmail, targetRole)
+                setLoading(false)
+                return
+              } else if (signUpData?.user && !signUpData.session) {
+                setErrorMsg('Account registered. If email confirmation is enabled in your Supabase project, please verify your email or run the SQL seed in Supabase.')
+                setLoading(false)
+                return
+              }
+            }
+
+            setErrorMsg(error.message)
+            setLoading(false)
+            return
+          }
+
+          if (data?.user) {
+            await handleSuccessfulLogin(data.user.id, data.user.email ?? cleanEmail)
           }
         }
+      } catch (err: any) {
+        setErrorMsg(err?.message || 'Authentication error. Please try again.')
       }
     } else {
       // Local Demo Authentication Mode (Immediate testing)
       setTimeout(() => {
-        if (!email || !password) {
-          setErrorMsg('Please enter both email and password.')
-          setLoading(false)
-          return
-        }
-
-        const role: UserRole = isSignUp ? signUpRole : email.toLowerCase().includes('admin') ? 'admin' : 'staff'
+        const role: UserRole = isSignUp ? signUpRole : cleanEmail.includes('admin') ? 'admin' : 'staff'
         const profile: UserProfile = {
           id: `demo-${Date.now()}`,
-          email,
-          full_name: email.split('@')[0],
+          email: cleanEmail,
+          full_name: cleanEmail.split('@')[0],
           role,
         }
         onLogin(profile)
-      }, 300)
+      }, 150)
     }
 
     setLoading(false)
@@ -718,6 +785,7 @@ function LoginPage({ onLogin }: { onLogin: (p: UserProfile) => void }) {
     setEmail(demoEmail)
     setPassword('Cenexa@2026')
     setIsSignUp(false)
+    setErrorMsg('')
   }
 
   return (

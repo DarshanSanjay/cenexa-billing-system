@@ -38,20 +38,23 @@ export type DbBill = {
   created_at?: string
 }
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim()
+const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
 
 export const isSupabaseConfigured = Boolean(
   supabaseUrl &&
   supabaseAnonKey &&
-  !supabaseUrl.includes('your-supabase') &&
-  !supabaseAnonKey.includes('your-anon-key')
+  supabaseUrl.startsWith('http') &&
+  !supabaseUrl.includes('your-project') &&
+  !supabaseUrl.includes('placeholder') &&
+  !supabaseAnonKey.includes('your-anon-key') &&
+  !supabaseAnonKey.includes('placeholder')
 )
 
 // Create Supabase Client
 export const supabase = createClient(
-  supabaseUrl || 'https://placeholder-project.supabase.co',
-  supabaseAnonKey || 'placeholder-anon-key',
+  isSupabaseConfigured ? supabaseUrl : 'https://placeholder-project.supabase.co',
+  isSupabaseConfigured ? supabaseAnonKey : 'placeholder-anon-key',
   {
     auth: {
       persistSession: true,
