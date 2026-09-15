@@ -3,9 +3,9 @@
 A manager-demo billing application for Cenexa.
 
 ## Team
-- Developer 1: Darshan
-- Developer 2: [Add name]
-- UI/UX Designer: [Add name]
+- Developer 1: Darshan Sanjay
+- Developer 2: Dillikumar M S
+  
 
 ## About
 This project is an independently built demo inspired by the workflow and feature ideas observed in a separate reference application. It does not use the reference project's branding, business data, or source code.
