@@ -473,9 +473,14 @@ function App() {
           {currentUser.role === 'admin' ? 'ADMIN MENU' : 'STAFF MENU'}
         </div>
 
-        <nav>
+        <nav aria-label="Main navigation">
           {nav.map(([key, label, Icon]) => (
-            <button key={key} className={page === key ? 'nav active' : 'nav'} onClick={() => setPage(key)}>
+            <button
+              key={key}
+              className={page === key ? 'nav active' : 'nav'}
+              onClick={() => setPage(key)}
+              aria-current={page === key ? 'page' : undefined}
+            >
               <Icon size={19} />
               <span>{label}</span>
               {key === 'billing' && <span className="newBadge">NEW</span>}
@@ -494,7 +499,7 @@ function App() {
             </div>
           </div>
 
-          <button className="logoutBtn" onClick={handleLogout}>
+          <button className="logoutBtn" onClick={handleLogout} aria-label="Sign out of your account">
             <LogOut size={16} />
             <span>Sign Out</span>
           </button>
@@ -613,6 +618,33 @@ function App() {
           onDetected={handleScan}
         />
       </main>
+
+      {/* ── Mobile Bottom Navigation (visible < 768px) ── */}
+      <nav className="mobileNav" aria-label="Mobile navigation">
+        {(currentUser.role === 'admin'
+          ? [
+              ['dashboard', 'Home', LayoutDashboard],
+              ['billing', 'Billing', ShoppingCart],
+              ['products', 'Products', Boxes],
+              ['reports', 'Reports', BarChart3],
+              ['settings', 'More', Settings],
+            ] as [string, string, ComponentType<{ size?: number }>][]
+          : [
+              ['billing', 'Billing', ShoppingCart],
+            ] as [string, string, ComponentType<{ size?: number }>][]
+        ).map(([key, label, Icon]) => (
+          <button
+            key={key}
+            className={`mobileNavItem${page === key ? ' active' : ''}`}
+            onClick={() => setPage(key)}
+            aria-current={page === key ? 'page' : undefined}
+            aria-label={label}
+          >
+            <Icon size={20} />
+            <span>{label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   )
 }
